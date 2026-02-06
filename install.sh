@@ -132,51 +132,44 @@ do_hostname() {
 do_swap() {
     [[ -z "$CONF_SWAP_SIZE" ]] && return
     log "\n${YELLOW}>>> 配置 Swap...${NC}"
-    
-    # 检查磁盘空间
-    check_disk_space $((CONF_SWAP_SIZE + 100)) || return 1
-    
+
+    # --- 1. 预先检测：如果是 OpenVZ/LXC，直接放弃 ---
+    # 大部分容器环境没有 swap 权限，或者 /proc/swaps 是只读的
+    if [ ! -f /proc/swaps ]; then
+        log "${YELLOW}⚠️  检测到非标准内核环境，跳过 Swap 配置。${NC}"
+        return 0
+    fi
+
     local swap_file="/swapfile"
-    # 如果已存在，先清理
-    if [[ -f "$swap_file" ]]; then
-        swapoff "$swap_file" 2>/dev/null || true
-        rm -f "$swap_file"
-    fi
     
-    log "${BLUE}正在创建 ${CONF_SWAP_SIZE}MB Swap文件...${NC}"
+    # --- 2. 暴力清理旧文件 ---
+    swapoff "$swap_file" 2>/dev/null || true
+    rm -f "$swap_file"
+
+    # --- 3. 一条龙创建 (使用 && 串联，中间出错自动跳到 || 处理) ---
+    log "${BLUE}正在创建 ${CONF_SWAP_SIZE}MB Swap...${NC}"
     
-    # --- 核心修复开始 ---
-    # 逻辑说明：尝试使用 fallocate (速度快)，如果失败 (||) 则回退使用 dd (兼容性好)
-    # 这样写可以避免 set -e 在 fallocate 失败时导致脚本直接退出
-    if command -v fallocate &>/dev/null; then
-        fallocate -l "${CONF_SWAP_SIZE}M" "$swap_file" >> "$LOG_FILE" 2>&1 || \
-        dd if=/dev/zero of="$swap_file" bs=1M count="$CONF_SWAP_SIZE" status=none >> "$LOG_FILE" 2>&1
+    (
+        # 使用 dd (最稳兼容性) -> 设置权限 -> 格式化 -> 挂载
+        dd if=/dev/zero of="$swap_file" bs=1M count="$CONF_SWAP_SIZE" status=none && \
+        chmod 600 "$swap_file" && \
+        mkswap "$swap_file" && \
+        swapon "$swap_file"
+    ) >> "$LOG_FILE" 2>&1
+
+    # --- 4. 检查结果 ---
+    if [ $? -eq 0 ]; then
+        # 成功：写入 fstab 防止重启失效
+        grep -q "$swap_file" /etc/fstab || echo "$swap_file none swap sw 0 0" >> /etc/fstab
+        log "${GREEN}✅ Swap 配置成功${NC}"
     else
-        dd if=/dev/zero of="$swap_file" bs=1M count="$CONF_SWAP_SIZE" status=none >> "$LOG_FILE" 2>&1
-    fi
-    # --- 核心修复结束 ---
-    
-    # 二次确认文件是否创建成功
-    if [[ ! -f "$swap_file" ]]; then
-        log "${RED}[ERROR] Swap 文件创建失败，请检查磁盘空间或权限${NC}"
-        return 1
-    fi
-    
-    chmod 600 "$swap_file"
-    mkswap "$swap_file" >> "$LOG_FILE" 2>&1
-    
-    # 尝试挂载，如果失败则回滚
-    if ! swapon "$swap_file" >> "$LOG_FILE" 2>&1; then
-        log "${RED}[ERROR] 无法启用 Swap (swapon 失败)。可能因为是 OpenVZ/LXC 容器或权限不足。${NC}"
+        # 失败：清理垃圾，但不报错退出
         rm -f "$swap_file"
-        return 1
+        log "${YELLOW}⚠️  Swap 创建失败 (可能是容器权限限制)，已跳过。${NC}"
     fi
     
-    # 写入 fstab
-    if ! grep -q "$swap_file" /etc/fstab; then
-        echo "$swap_file none swap sw 0 0" >> /etc/fstab
-    fi
-    log "${GREEN}✅ Swap 配置完成${NC}"
+    # 无论成功失败，都返回 0，保证脚本不退出
+    return 0
 }
 
 # 3. 配置 SSH
