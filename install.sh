@@ -144,7 +144,8 @@ do_swap() {
     
     log "${BLUE}正在创建 ${CONF_SWAP_SIZE}MB Swap文件...${NC}"
     if command -v fallocate &>/dev/null; then
-        fallocate -l "${CONF_SWAP_SIZE}M" "$swap_file" >> "$LOG_FILE" 2>&1
+        fallocate -l "${CONF_SWAP_SIZE}M" "$swap_file" >> "$LOG_FILE" 2>&1 || \
+        dd if=/dev/zero of="$swap_file" bs=1M count="$CONF_SWAP_SIZE" status=none >> "$LOG_FILE" 2>&1
     else
         dd if=/dev/zero of="$swap_file" bs=1M count="$CONF_SWAP_SIZE" status=none >> "$LOG_FILE" 2>&1
     fi
