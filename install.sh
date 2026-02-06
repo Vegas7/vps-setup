@@ -133,6 +133,7 @@ do_swap() {
     [[ -z "$CONF_SWAP_SIZE" ]] && return
     log "\n${YELLOW}>>> 配置 Swap...${NC}"
     
+    # 检查磁盘空间
     check_disk_space $((CONF_SWAP_SIZE + 100)) || return 1
     
     local swap_file="/swapfile"
@@ -143,16 +144,33 @@ do_swap() {
     fi
     
     log "${BLUE}正在创建 ${CONF_SWAP_SIZE}MB Swap文件...${NC}"
+    
+    # --- 核心修复开始 ---
+    # 逻辑说明：尝试使用 fallocate (速度快)，如果失败 (||) 则回退使用 dd (兼容性好)
+    # 这样写可以避免 set -e 在 fallocate 失败时导致脚本直接退出
     if command -v fallocate &>/dev/null; then
         fallocate -l "${CONF_SWAP_SIZE}M" "$swap_file" >> "$LOG_FILE" 2>&1 || \
         dd if=/dev/zero of="$swap_file" bs=1M count="$CONF_SWAP_SIZE" status=none >> "$LOG_FILE" 2>&1
     else
         dd if=/dev/zero of="$swap_file" bs=1M count="$CONF_SWAP_SIZE" status=none >> "$LOG_FILE" 2>&1
     fi
+    # --- 核心修复结束 ---
+    
+    # 二次确认文件是否创建成功
+    if [[ ! -f "$swap_file" ]]; then
+        log "${RED}[ERROR] Swap 文件创建失败，请检查磁盘空间或权限${NC}"
+        return 1
+    fi
     
     chmod 600 "$swap_file"
     mkswap "$swap_file" >> "$LOG_FILE" 2>&1
-    swapon "$swap_file" >> "$LOG_FILE" 2>&1
+    
+    # 尝试挂载，如果失败则回滚
+    if ! swapon "$swap_file" >> "$LOG_FILE" 2>&1; then
+        log "${RED}[ERROR] 无法启用 Swap (swapon 失败)。可能因为是 OpenVZ/LXC 容器或权限不足。${NC}"
+        rm -f "$swap_file"
+        return 1
+    fi
     
     # 写入 fstab
     if ! grep -q "$swap_file" /etc/fstab; then
